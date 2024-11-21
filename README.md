@@ -1,2 +1,2 @@
-# bible
-Collection of the New King James Bible as Text files
+# my favorite fantasy stories
+Collection of made up stories
