@@ -16,7 +16,22 @@ SRP1868_USFM_URL = "https://ebible.org/Scriptures/srp1868_usfm.zip"
 LUTH1912AP_OSIS_URL = (
     "https://raw.githubusercontent.com/gratis-bible/bible/master/de/luth1912ap.xml"
 )
+OPEN_BIBLES_BULGARIAN_OSIS_URL = (
+    "https://raw.githubusercontent.com/seven1m/open-bibles/master/"
+    "bul-bulgarian.osis.xml"
+)
 SVETOSAVLJE_BASE_URL = "https://svetosavlje.org/"
+EBIBLE_SCRIPTURES_BASE_URL = "https://ebible.org/Scriptures/"
+
+EBIBLE_USFM_TRANSLATIONS = {
+    "be": "bel",
+    "es": "spablm",
+    "fr": "frasbl",
+    "it": "ita1927",
+    "ro": "ronbtf",
+    "ru": "russyn",
+    "uk": "ukrfb",
+}
 
 BOOKS_66 = [
     ("1_Genesis", "Genesis", "Gen", "GEN"),
@@ -96,6 +111,21 @@ DE_DEUTEROCANON = [
     ("45_1 Maccabees", "1 Maccabees", "1Macc"),
     ("46_2 Maccabees", "2 Maccabees", "2Macc"),
     ("48_Prayer of Manasseh", "Prayer of Manasseh", "PrMan"),
+]
+
+USFM_DEUTEROCANON = [
+    ("40_Tobit", "Tobit", "TOB"),
+    ("41_Judith", "Judith", "JDT"),
+    ("42_Wisdom", "Wisdom", "WIS"),
+    ("43_Sirach", "Sirach", "SIR"),
+    ("44_Baruch", "Baruch", "BAR"),
+    ("45_1 Maccabees", "1 Maccabees", "1MA"),
+    ("46_2 Maccabees", "2 Maccabees", "2MA"),
+    ("47_1 Esdras", "1 Esdras", "1ES"),
+    ("48_Prayer of Manasseh", "Prayer of Manasseh", "MAN"),
+    ("49_3 Maccabees", "3 Maccabees", "3MA"),
+    ("50_2 Esdras", "2 Esdras", "2ES"),
+    ("51_4 Maccabees", "4 Maccabees", "4MA"),
 ]
 
 VerseMap = dict[tuple[str, str, int], dict[int, str]]
@@ -370,9 +400,34 @@ def load_usfm_zip(zip_path: Path, suffix: str) -> dict[str, dict[int, dict[int, 
     return books
 
 
-def find_usfm_member(names: Iterable[str], usfm_code: str, suffix: str) -> str:
+def load_optional_usfm_books(
+    zip_path: Path,
+    suffix: str,
+    usfm_codes: Iterable[str],
+) -> dict[str, dict[int, dict[int, str]]]:
+    books: dict[str, dict[int, dict[int, str]]] = {}
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+        for usfm_code in usfm_codes:
+            name = find_usfm_member(names, usfm_code, suffix, required=False)
+            if name is None:
+                continue
+            usfm = archive.read(name).decode("utf-8")
+            books[usfm_code] = parse_usfm_verses(usfm)
+    return books
+
+
+def find_usfm_member(
+    names: Iterable[str],
+    usfm_code: str,
+    suffix: str,
+    *,
+    required: bool = True,
+) -> str | None:
     pattern = re.compile(rf"^\d+-{re.escape(usfm_code)}{re.escape(suffix)}\.usfm$")
     matches = [name for name in names if pattern.match(name)]
+    if not matches and not required:
+        return None
     if len(matches) != 1:
         raise ValueError(f"Expected one {usfm_code} USFM file, found {matches}")
     return matches[0]
@@ -606,6 +661,132 @@ def direct_usfm_sources(usfm_books: dict[str, dict[int, dict[int, str]]]) -> Ver
     return sources
 
 
+def add_usfm_sources_for_books(
+    sources: VerseMap,
+    usfm_books: dict[str, dict[int, dict[int, str]]],
+    books: Iterable[tuple[str, str, str]],
+    *,
+    code_overrides: dict[str, str] | None = None,
+) -> None:
+    overrides = code_overrides or {}
+    for directory, file_book, usfm_code in books:
+        source_code = overrides.get(usfm_code, usfm_code)
+        if source_code not in usfm_books:
+            continue
+        for chapter, verses in usfm_books[source_code].items():
+            sources[(directory, file_book, chapter)] = dict(verses)
+
+
+def build_ebible_usfm_sources(zip_path: Path, suffix: str) -> VerseMap:
+    sources = direct_usfm_sources(load_usfm_zip(zip_path, suffix))
+    optional_books = load_optional_usfm_books(
+        zip_path,
+        suffix,
+        [
+            *(code for _, _, code in USFM_DEUTEROCANON),
+            "DAG",
+            "ESG",
+            "LJE",
+            "PS2",
+        ],
+    )
+    add_usfm_sources_for_books(sources, optional_books, USFM_DEUTEROCANON)
+
+    if "ESG" in optional_books:
+        add_usfm_sources_for_books(
+            sources,
+            optional_books,
+            [("17_Esther", "Esther", "ESG")],
+        )
+
+    if "DAG" in optional_books:
+        add_usfm_sources_for_books(
+            sources,
+            optional_books,
+            [("27_Daniel", "Daniel", "DAG")],
+        )
+
+    if "LJE" in optional_books:
+        sources[("44_Baruch", "Baruch", 6)] = dict(
+            optional_books["LJE"].get(1, {})
+        )
+
+    psalm_151 = optional_books.get("PS2", {}).get(1)
+    if psalm_151:
+        sources[("19_Psalm", "Psalm", 151)] = dict(psalm_151)
+
+    return sources
+
+
+def build_greek_sources(lxx_zip_path: Path, nt_zip_path: Path) -> VerseMap:
+    sources: VerseMap = {}
+    lxx_books = load_optional_usfm_books(
+        lxx_zip_path,
+        "grclxx",
+        [
+            *(code for _, _, _, code in BOOKS_66[:39]),
+            *(code for _, _, code in USFM_DEUTEROCANON if code != "2ES"),
+            "DAG",
+            "ESG",
+            "LJE",
+            "PSA",
+            "2ES",
+        ],
+    )
+    add_usfm_sources_for_books(
+        sources,
+        lxx_books,
+        [
+            (directory, file_book, usfm_code)
+            for directory, file_book, _, usfm_code in BOOKS_66[:39]
+        ],
+        code_overrides={"EZR": "2ES"},
+    )
+    add_usfm_sources_for_books(
+        sources,
+        lxx_books,
+        [
+            (directory, file_book, code)
+            for directory, file_book, code in USFM_DEUTEROCANON
+            if code != "2ES"
+        ],
+    )
+
+    if "ESG" in lxx_books:
+        add_usfm_sources_for_books(
+            sources,
+            lxx_books,
+            [("17_Esther", "Esther", "ESG")],
+        )
+    if "DAG" in lxx_books:
+        add_usfm_sources_for_books(
+            sources,
+            lxx_books,
+            [("27_Daniel", "Daniel", "DAG")],
+        )
+    if "LJE" in lxx_books:
+        sources[("44_Baruch", "Baruch", 6)] = dict(lxx_books["LJE"].get(1, {}))
+
+    psalm_151 = lxx_books.get("PSA", {}).get(151)
+    if psalm_151:
+        sources[("19_Psalm", "Psalm", 151)] = dict(psalm_151)
+
+    nt_books = load_optional_usfm_books(
+        nt_zip_path,
+        "grcbyz",
+        [usfm_code for _, _, _, usfm_code in BOOKS_66[39:]],
+    )
+    add_usfm_sources_for_books(
+        sources,
+        nt_books,
+        [
+            (directory, file_book, usfm_code)
+            for directory, file_book, _, usfm_code in BOOKS_66[39:]
+        ],
+    )
+    return sources
+
+
 def remap_daniel_3(
     sources: VerseMap,
     usfm_code_or_osis: str,
@@ -639,6 +820,13 @@ def build_german_sources(osis_path: Path) -> VerseMap:
     add_german_daniel_additions(sources, osis_books)
     add_german_esther_additions(sources, osis_books)
     return sources
+
+
+def build_bulgarian_sources(osis_path: Path) -> VerseMap:
+    return direct_osis_sources(
+        parse_osis_verses(osis_path),
+        include_deuterocanon=False,
+    )
 
 
 def parse_osis_verses(path: Path) -> dict[str, dict[int, dict[int, str]]]:
@@ -677,15 +865,20 @@ def osis_text(node: ElementTree.Element) -> str:
 
 def direct_osis_sources(
     osis_books: dict[str, dict[int, dict[int, str]]],
+    *,
+    include_deuterocanon: bool = True,
 ) -> VerseMap:
     sources: VerseMap = {}
     for directory, file_book, osis_id, _ in BOOKS_66:
         for chapter, verses in osis_books[osis_id].items():
             sources[(directory, file_book, chapter)] = dict(verses)
 
-    for directory, file_book, osis_id in DE_DEUTEROCANON:
-        for chapter, verses in osis_books[osis_id].items():
-            sources[(directory, file_book, chapter)] = dict(verses)
+    if include_deuterocanon:
+        for directory, file_book, osis_id in DE_DEUTEROCANON:
+            if osis_id not in osis_books:
+                continue
+            for chapter, verses in osis_books[osis_id].items():
+                sources[(directory, file_book, chapter)] = dict(verses)
 
     return sources
 
@@ -802,7 +995,7 @@ def validate_against_english(root: Path, languages: Iterable[str]) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Build Serbian and German chapter files aligned to en/ verse counts."
+        description="Build localized chapter files aligned to en/ verse counts."
     )
     parser.add_argument("root", nargs="?", default=".")
     parser.add_argument("--cache-dir", default="/tmp/bible-verse-source-cache")
@@ -811,18 +1004,46 @@ def main() -> int:
     root = Path(args.root)
     cache_dir = Path(args.cache_dir)
     de_osis = download(LUTH1912AP_OSIS_URL, cache_dir / "luth1912ap.xml")
+    bg_osis = download(
+        OPEN_BIBLES_BULGARIAN_OSIS_URL,
+        cache_dir / "bul-bulgarian.osis.xml",
+    )
+    greek_lxx = download(
+        EBIBLE_SCRIPTURES_BASE_URL + "grclxx_usfm.zip",
+        cache_dir / "grclxx_usfm.zip",
+    )
+    greek_nt = download(
+        EBIBLE_SCRIPTURES_BASE_URL + "grcbyz_usfm.zip",
+        cache_dir / "grcbyz_usfm.zip",
+    )
 
     write_language(root, "sr", build_serbian_sources(cache_dir))
     write_language(root, "de", build_german_sources(de_osis))
+    write_language(root, "bg", build_bulgarian_sources(bg_osis))
+    write_language(root, "el", build_greek_sources(greek_lxx, greek_nt))
 
-    errors = validate_against_english(root, ["sr", "de"])
+    generated_languages = ["sr", "de", "bg", "el"]
+    for language, translation_id in sorted(EBIBLE_USFM_TRANSLATIONS.items()):
+        zip_path = download(
+            EBIBLE_SCRIPTURES_BASE_URL + f"{translation_id}_usfm.zip",
+            cache_dir / f"{translation_id}_usfm.zip",
+        )
+        write_language(
+            root,
+            language,
+            build_ebible_usfm_sources(zip_path, translation_id),
+        )
+        generated_languages.append(language)
+
+    errors = validate_against_english(root, generated_languages)
     if errors:
         for error in errors:
             print(error)
         return 1
 
     layout = expected_layout(root)
-    print(f"Wrote {len(layout)} chapter files for sr and {len(layout)} for de.")
+    languages = ", ".join(sorted(generated_languages))
+    print(f"Wrote {len(layout)} chapter files for each language: {languages}.")
     print("All generated chapter line counts match en.")
     return 0
 
